@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "com.stepwriter.app"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.stepwriter.app"
@@ -13,7 +13,6 @@ android {
         targetSdk = 35
         versionCode = 2
         versionName = "1.1.0"
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
