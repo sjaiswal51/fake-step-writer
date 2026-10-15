@@ -12,27 +12,35 @@ import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.StepsRecord
 import androidx.health.connect.client.request.AggregateRequest
 import androidx.health.connect.client.time.TimeRangeFilter
-import kotlinx.coroutines.*
-import java.time.*
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.time.LocalDate
+import java.time.ZoneId
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var healthConnectClient: HealthConnectClient
     private lateinit var tvStatus: TextView
     private lateinit var editStepCount: EditText
+    private lateinit var btnWrite: Button
+    private lateinit var btnRead: Button
 
-    private val PERMISSIONS = setOf(
+    private val permissions = setOf(
         HealthPermission.getReadPermission(StepsRecord::class),
         HealthPermission.getWritePermission(StepsRecord::class)
     )
 
     private val requestPermissionLauncher =
         registerForActivityResult(PermissionController.createRequestPermissionResultContract()) { granted ->
-            if (granted.containsAll(PERMISSIONS)) {
-                tvStatus.text = "✅ Permissions granted! You can now write steps."
+            tvStatus.text = if (granted.containsAll(permissions)) {
+                "Permissions granted. Ready to use Health Connect."
             } else {
-                tvStatus.text = "❌ Permissions denied. Please grant Health Connect permissions in Settings."
+                "Health Connect permissions were not granted."
             }
+            setControlsEnabled(true)
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -41,193 +49,116 @@ class MainActivity : AppCompatActivity() {
 
         tvStatus = findViewById(R.id.tvStatus)
         editStepCount = findViewById(R.id.editStepCount)
-        val btnWrite = findViewById<Button>(R.id.btnWriteSteps)
-        val btnRead = findViewById<Button>(R.id.btnReadSteps)
+        btnWrite = findViewById(R.id.btnWriteSteps)
+        btnRead = findViewById(R.id.btnReadSteps)
 
-        // Check if Health Connect is available
-        val availabilityStatus = HealthConnectClient.getSdkStatus(this)
-        if (availabilityStatus != HealthConnectClient.SDK_AVAILABLE) {
-            tvStatus.text = "❌ Health Connect is not available on this device."
-            btnWrite.isEnabled = false
-            btnRead.isEnabled = false
+        val availability = HealthConnectClient.getSdkStatus(this)
+        if (availability != HealthConnectClient.SDK_AVAILABLE) {
+            tvStatus.text = "Health Connect is not available on this device."
+            setControlsEnabled(false)
             return
         }
 
         healthConnectClient = HealthConnectClient.getOrCreate(this)
-
-        // Check and request permissions
-        CoroutineScope(Dispatchers.Main).launch {
-            checkPermissions()
-        }
-
         btnWrite.setOnClickListener {
-            val stepCount = editStepCount.text.toString().toLongOrNull()
-            if (stepCount == null || stepCount <= 0) {
-                tvStatus.text = "⚠️ Enter a valid step count!"
+            val count = editStepCount.text.toString().trim().toLongOrNull()
+            if (count == null || count !in 1L..MAX_STEPS_PER_WRITE) {
+                tvStatus.text = "Enter a step count between 1 and $MAX_STEPS_PER_WRITE."
                 return@setOnClickListener
             }
-            writeSteps(stepCount)
+            writeSteps(count)
         }
+        btnRead.setOnClickListener { readTodaySteps() }
 
-        btnRead.setOnClickListener {
-            readTodaySteps()
+        lifecycleScope.launch {
+            try {
+                ensurePermissions()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                tvStatus.text = "Unable to check Health Connect permissions."
+            }
         }
     }
 
-    private suspend fun checkPermissions() {
+    private suspend fun ensurePermissions(): Boolean {
         val granted = healthConnectClient.permissionController.getGrantedPermissions()
-        if (!granted.containsAll(PERMISSIONS)) {
-            tvStatus.text = "🔐 Requesting Health Connect permissions..."
-            requestPermissionLauncher.launch(PERMISSIONS)
-        } else {
-            tvStatus.text = "✅ Permissions already granted. Ready to write steps!"
-        }
+        if (granted.containsAll(permissions)) return true
+
+        tvStatus.text = "Grant Health Connect permissions to continue."
+        requestPermissionLauncher.launch(permissions)
+        return false
+    }
+
+    private fun setControlsEnabled(enabled: Boolean) {
+        if (::btnWrite.isInitialized) btnWrite.isEnabled = enabled
+        if (::btnRead.isInitialized) btnRead.isEnabled = enabled
     }
 
     private fun writeSteps(count: Long) {
-        tvStatus.text = "⏳ Writing $count steps to Health Connect..."
+        setControlsEnabled(false)
+        tvStatus.text = "Preparing $count test steps…"
 
-        CoroutineScope(Dispatchers.Main).launch {
+        lifecycleScope.launch {
             try {
-                // Check permissions first
-                val granted = healthConnectClient.permissionController.getGrantedPermissions()
-                if (!granted.containsAll(PERMISSIONS)) {
-                    requestPermissionLauncher.launch(PERMISSIONS)
-                    return@launch
-                }
+                if (!ensurePermissions()) return@launch
 
-                withContext(Dispatchers.IO) {
-                    val zoneOffset = ZoneOffset.ofHoursMinutes(5, 30) // IST
-
-                    // Split steps into realistic walking sessions throughout the day
-                    val today = LocalDate.now()
-                    val sessions = generateRealisticSessions(count, today, zoneOffset)
-
-                    healthConnectClient.insertRecords(sessions)
-                }
-
-                tvStatus.text = "✅ Successfully wrote $count steps to Health Connect!\n\nThe steps should now appear in your Health Connect app."
-                Toast.makeText(this@MainActivity, "✅ $count steps written!", Toast.LENGTH_LONG).show()
-
-            } catch (e: Exception) {
-                tvStatus.text = "❌ Error: ${e.message}\n\nMake sure Health Connect permissions are granted."
-                e.printStackTrace()
-            }
-        }
-    }
-
-    private fun generateRealisticSessions(
-        totalSteps: Long,
-        date: LocalDate,
-        zoneOffset: ZoneOffset
-    ): List<StepsRecord> {
-        val records = mutableListOf<StepsRecord>()
-        var remaining = totalSteps
-
-        // Create walking sessions spread throughout the day
-        // Each session starts at a different hour to look natural
-        data class Session(val hour: Int, val minute: Int, val durationMinutes: Int, val fraction: Double)
-
-        val sessionTemplates = listOf(
-            Session(6, 30, 25, 0.10),   // Early morning walk
-            Session(7, 15, 20, 0.08),   // Getting ready / moving around
-            Session(8, 0, 15, 0.05),    // Commute
-            Session(9, 30, 10, 0.04),   // Office movement
-            Session(10, 45, 12, 0.05),  // Mid-morning
-            Session(12, 0, 20, 0.08),   // Lunch break walk
-            Session(13, 30, 10, 0.04),  // Post lunch
-            Session(15, 0, 15, 0.06),   // Afternoon
-            Session(16, 30, 12, 0.05),  // Tea break walk
-            Session(17, 30, 25, 0.12),  // Evening walk/commute
-            Session(18, 30, 30, 0.15),  // Evening exercise
-            Session(20, 0, 20, 0.10),   // Post dinner walk
-            Session(21, 0, 15, 0.08),   // Night walk
-        )
-
-        val now = Instant.now()
-
-        for (template in sessionTemplates) {
-            if (remaining <= 0) break
-
-            val sessionSteps = minOf((totalSteps * template.fraction).toLong(), remaining)
-            if (sessionSteps <= 0) continue
-
-            val startTime = date.atTime(template.hour, template.minute)
-                .toInstant(zoneOffset)
-
-            // Skip sessions that start in the future
-            if (startTime >= now) continue
-
-            var endTime = startTime.plusSeconds(template.durationMinutes.toLong() * 60)
-            // Cap end time to now if it's in the future
-            if (endTime > now) {
-                endTime = now.minusSeconds(1)
-            }
-
-            records.add(
-                StepsRecord(
-                    count = sessionSteps,
-                    startTime = startTime,
-                    endTime = endTime,
-                    startZoneOffset = zoneOffset,
-                    endZoneOffset = zoneOffset
-                )
-            )
-
-            remaining -= sessionSteps
-        }
-
-        // If there are remaining steps, add them to the most recent past session
-        if (remaining > 0) {
-            val startTime = date.atTime(21, 30).toInstant(zoneOffset)
-            // Only add if the start time is in the past
-            if (startTime < now) {
-                var endTime = startTime.plusSeconds(20 * 60)
-                if (endTime > now) {
-                    endTime = now.minusSeconds(1)
-                }
-                records.add(
-                    StepsRecord(
-                        count = remaining,
-                        startTime = startTime,
-                        endTime = endTime,
-                        startZoneOffset = zoneOffset,
-                        endZoneOffset = zoneOffset
+                val zone = ZoneId.systemDefault()
+                val plan = withContext(Dispatchers.Default) {
+                    StepSessionPlanner.plan(
+                        count = count,
+                        date = LocalDate.now(zone),
+                        zone = zone,
+                        now = java.time.Instant.now()
                     )
-                )
-            } else if (records.isNotEmpty()) {
-                // Add remaining steps to the last valid session
-                val lastRecord = records.removeAt(records.lastIndex)
-                records.add(
+                }
+                val records = plan.map {
                     StepsRecord(
-                        count = lastRecord.count + remaining,
-                        startTime = lastRecord.startTime,
-                        endTime = lastRecord.endTime,
-                        startZoneOffset = lastRecord.startZoneOffset,
-                        endZoneOffset = lastRecord.endZoneOffset
+                        count = it.count,
+                        startTime = it.startTime,
+                        endTime = it.endTime,
+                        startZoneOffset = it.zoneOffset,
+                        endZoneOffset = it.zoneOffset
                     )
-                )
+                }
+
+                // Confirm the intended batch is valid before any write.
+                require(records.isNotEmpty()) { "No valid session windows are available yet today." }
+                require(records.sumOf { it.count } == count) { "The planned total is invalid." }
+                require(records.all { it.startTime < it.endTime }) { "A session has an invalid time interval." }
+
+                healthConnectClient.insertRecords(records)
+                tvStatus.text =
+                    "Wrote $count synthetic/test steps to Health Connect. " +
+                    "Other apps may apply their own source and data validation."
+                Toast.makeText(this@MainActivity, "Test records written.", Toast.LENGTH_LONG).show()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: IllegalArgumentException) {
+                tvStatus.text = "No valid session windows are available for the current date and time."
+            } catch (_: SecurityException) {
+                tvStatus.text = "Health Connect permission is missing. Check permissions in Settings."
+            } catch (_: Exception) {
+                tvStatus.text = "Unable to write step records. Check Health Connect availability and permissions."
+            } finally {
+                setControlsEnabled(true)
             }
         }
-
-        return records
     }
 
     private fun readTodaySteps() {
-        tvStatus.text = "⏳ Reading today's steps..."
+        setControlsEnabled(false)
+        tvStatus.text = "Reading today's Health Connect total…"
 
-        CoroutineScope(Dispatchers.Main).launch {
+        lifecycleScope.launch {
             try {
-                val granted = healthConnectClient.permissionController.getGrantedPermissions()
-                if (!granted.containsAll(PERMISSIONS)) {
-                    requestPermissionLauncher.launch(PERMISSIONS)
-                    return@launch
-                }
+                if (!ensurePermissions()) return@launch
 
                 val result = withContext(Dispatchers.IO) {
-                    val today = LocalDate.now()
-                    val startOfDay = today.atStartOfDay(ZoneId.systemDefault()).toInstant()
-                    val endOfDay = today.plusDays(1).atStartOfDay(ZoneId.systemDefault()).toInstant()
+                    val zone = ZoneId.systemDefault()
+                    val today = LocalDate.now(zone)
+                    val startOfDay = today.atStartOfDay(zone).toInstant()
+                    val endOfDay = today.plusDays(1).atStartOfDay(zone).toInstant()
 
                     healthConnectClient.aggregate(
                         AggregateRequest(
@@ -238,12 +169,20 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 val steps = result[StepsRecord.COUNT_TOTAL] ?: 0L
-                tvStatus.text = "📊 Today's total steps: $steps"
-
-            } catch (e: Exception) {
-                tvStatus.text = "❌ Error reading: ${e.message}"
-                e.printStackTrace()
+                tvStatus.text = "Today's Health Connect total: $steps steps. This may include records from other apps."
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: SecurityException) {
+                tvStatus.text = "Health Connect read permission is missing."
+            } catch (_: Exception) {
+                tvStatus.text = "Unable to read today's total from Health Connect."
+            } finally {
+                setControlsEnabled(true)
             }
         }
+    }
+
+    private companion object {
+        const val MAX_STEPS_PER_WRITE = 100_000L
     }
 }
