@@ -35,3 +35,10 @@ jobs:
 
       - name: Run unit tests and build debug APK
         run: gradle testDebugUnitTest assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: health-connect-test-writer-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
