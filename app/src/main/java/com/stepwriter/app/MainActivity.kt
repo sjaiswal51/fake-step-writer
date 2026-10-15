@@ -10,6 +10,7 @@ import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.PermissionController
 import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.StepsRecord
+import androidx.health.connect.client.records.metadata.Metadata
 import androidx.health.connect.client.request.AggregateRequest
 import androidx.health.connect.client.time.TimeRangeFilter
 import androidx.lifecycle.lifecycleScope
@@ -17,9 +18,16 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 
+/**
+ * Health Connect test utility.
+ *
+ * Records created by this app are explicitly marked as manually entered test data.
+ * This app does not try to represent the records as sensor-captured activity.
+ */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var healthConnectClient: HealthConnectClient
@@ -36,7 +44,7 @@ class MainActivity : AppCompatActivity() {
     private val requestPermissionLauncher =
         registerForActivityResult(PermissionController.createRequestPermissionResultContract()) { granted ->
             tvStatus.text = if (granted.containsAll(permissions)) {
-                "Permissions granted. Ready to use Health Connect."
+                "Health Connect permissions granted."
             } else {
                 "Health Connect permissions were not granted."
             }
@@ -52,8 +60,7 @@ class MainActivity : AppCompatActivity() {
         btnWrite = findViewById(R.id.btnWriteSteps)
         btnRead = findViewById(R.id.btnReadSteps)
 
-        val availability = HealthConnectClient.getSdkStatus(this)
-        if (availability != HealthConnectClient.SDK_AVAILABLE) {
+        if (HealthConnectClient.getSdkStatus(this) != HealthConnectClient.SDK_AVAILABLE) {
             tvStatus.text = "Health Connect is not available on this device."
             setControlsEnabled(false)
             return
@@ -62,11 +69,11 @@ class MainActivity : AppCompatActivity() {
         healthConnectClient = HealthConnectClient.getOrCreate(this)
         btnWrite.setOnClickListener {
             val count = editStepCount.text.toString().trim().toLongOrNull()
-            if (count == null || count !in 1L..MAX_STEPS_PER_WRITE) {
-                tvStatus.text = "Enter a step count between 1 and $MAX_STEPS_PER_WRITE."
+            if (!StepInputValidator.isValidCount(count)) {
+                tvStatus.text = "Enter a count between 1 and ${StepInputValidator.MAX_STEPS_PER_WRITE}."
                 return@setOnClickListener
             }
-            writeSteps(count)
+            writeTestRecord(count!!)
         }
         btnRead.setOnClickListener { readTodaySteps() }
 
@@ -95,51 +102,45 @@ class MainActivity : AppCompatActivity() {
         if (::btnRead.isInitialized) btnRead.isEnabled = enabled
     }
 
-    private fun writeSteps(count: Long) {
+    private fun writeTestRecord(count: Long) {
         setControlsEnabled(false)
-        tvStatus.text = "Preparing $count test steps…"
+        tvStatus.text = "Writing a clearly marked synthetic test record…"
 
         lifecycleScope.launch {
             try {
                 if (!ensurePermissions()) return@launch
 
                 val zone = ZoneId.systemDefault()
-                val plan = withContext(Dispatchers.Default) {
-                    StepSessionPlanner.plan(
-                        count = count,
-                        date = LocalDate.now(zone),
-                        zone = zone,
-                        now = java.time.Instant.now()
-                    )
-                }
-                val records = plan.map {
-                    StepsRecord(
-                        count = it.count,
-                        startTime = it.startTime,
-                        endTime = it.endTime,
-                        startZoneOffset = it.zoneOffset,
-                        endZoneOffset = it.zoneOffset
-                    )
+                val now = Instant.now()
+                val start = now.minusSeconds(TEST_RECORD_DURATION_SECONDS)
+                val offset = zone.rules.getOffset(now)
+
+                require(StepInputValidator.isValidInterval(start, now)) {
+                    "Test record has an invalid time interval."
                 }
 
-                // Confirm the intended batch is valid before any write.
-                require(records.isNotEmpty()) { "No valid session windows are available yet today." }
-                require(records.sumOf { it.count } == count) { "The planned total is invalid." }
-                require(records.all { it.startTime < it.endTime }) { "A session has an invalid time interval." }
+                val record = StepsRecord(
+                    count = count,
+                    startTime = start,
+                    endTime = now,
+                    startZoneOffset = offset,
+                    endZoneOffset = offset,
+                    metadata = Metadata.manualEntry()
+                )
 
-                healthConnectClient.insertRecords(records)
+                healthConnectClient.insertRecords(listOf(record))
                 tvStatus.text =
-                    "Wrote $count synthetic/test steps to Health Connect. " +
-                    "Other apps may apply their own source and data validation."
-                Toast.makeText(this@MainActivity, "Test records written.", Toast.LENGTH_LONG).show()
+                    "Synthetic test record submitted as a manual entry. " +
+                    "Other apps may ignore manual records or apply their own validation."
+                Toast.makeText(this@MainActivity, "Test record submitted.", Toast.LENGTH_LONG).show()
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: IllegalArgumentException) {
-                tvStatus.text = "No valid session windows are available for the current date and time."
+                tvStatus.text = "The test record is invalid. Check the step count and try again."
             } catch (_: SecurityException) {
                 tvStatus.text = "Health Connect permission is missing. Check permissions in Settings."
             } catch (_: Exception) {
-                tvStatus.text = "Unable to write step records. Check Health Connect availability and permissions."
+                tvStatus.text = "Unable to write the test record. Check Health Connect availability and permissions."
             } finally {
                 setControlsEnabled(true)
             }
@@ -169,7 +170,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 val steps = result[StepsRecord.COUNT_TOTAL] ?: 0L
-                tvStatus.text = "Today's Health Connect total: $steps steps. This may include records from other apps."
+                tvStatus.text = "Today's Health Connect total: $steps steps. This can include records from other apps."
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: SecurityException) {
@@ -183,6 +184,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private companion object {
-        const val MAX_STEPS_PER_WRITE = 100_000L
+        const val TEST_RECORD_DURATION_SECONDS = 60L
     }
 }
