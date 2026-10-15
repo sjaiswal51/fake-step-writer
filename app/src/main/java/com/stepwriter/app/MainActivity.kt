@@ -35,6 +35,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editStepCount: EditText
     private lateinit var btnWrite: Button
     private lateinit var btnRead: Button
+    private var permissionRequestPending = false
 
     private val permissions = setOf(
         HealthPermission.getReadPermission(StepsRecord::class),
@@ -43,6 +44,7 @@ class MainActivity : AppCompatActivity() {
 
     private val requestPermissionLauncher =
         registerForActivityResult(PermissionController.createRequestPermissionResultContract()) { granted ->
+            permissionRequestPending = false
             tvStatus.text = if (granted.containsAll(permissions)) {
                 "Health Connect permissions granted."
             } else {
@@ -92,6 +94,8 @@ class MainActivity : AppCompatActivity() {
         val granted = healthConnectClient.permissionController.getGrantedPermissions()
         if (granted.containsAll(permissions)) return true
 
+        permissionRequestPending = true
+        setControlsEnabled(false)
         tvStatus.text = "Grant Health Connect permissions to continue."
         requestPermissionLauncher.launch(permissions)
         return false
@@ -142,7 +146,7 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Exception) {
                 tvStatus.text = "Unable to write the test record. Check Health Connect availability and permissions."
             } finally {
-                setControlsEnabled(true)
+                setControlsEnabled(!permissionRequestPending)
             }
         }
     }
@@ -178,7 +182,7 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Exception) {
                 tvStatus.text = "Unable to read today's total from Health Connect."
             } finally {
-                setControlsEnabled(true)
+                setControlsEnabled(!permissionRequestPending)
             }
         }
     }
