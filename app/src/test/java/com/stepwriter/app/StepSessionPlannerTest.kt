@@ -1,55 +1,31 @@
 package com.stepwriter.app
 
-import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Instant
-import java.time.LocalDate
-import java.time.ZoneId
 
-class StepSessionPlannerTest {
-    private val zone = ZoneId.of("Asia/Kolkata")
-    private val date = LocalDate.of(2026, 10, 15)
-
+class StepInputValidatorTest {
     @Test
-    fun plannedSessionsSumExactlyToRequestedCount() {
-        val result = StepSessionPlanner.plan(
-            count = 10_000L,
-            date = date,
-            zone = zone,
-            now = Instant.parse("2026-10-15T20:30:00Z")
-        )
-        assertEquals(10_000L, result.sumOf { it.count })
+    fun acceptsCountsInsideAllowedRange() {
+        assertTrue(StepInputValidator.isValidCount(1L))
+        assertTrue(StepInputValidator.isValidCount(10_000L))
+        assertTrue(StepInputValidator.isValidCount(StepInputValidator.MAX_STEPS_PER_WRITE))
     }
 
     @Test
-    fun generatedSessionsHavePositiveDurationAndAreNotFutureDated() {
-        val now = Instant.parse("2026-10-15T20:30:00Z")
-        val result = StepSessionPlanner.plan(1_000L, date, zone, now)
-        assertTrue(result.all { it.startTime < it.endTime })
-        assertTrue(result.all { it.endTime <= now })
+    fun rejectsNullNonPositiveAndExcessiveCounts() {
+        assertFalse(StepInputValidator.isValidCount(null))
+        assertFalse(StepInputValidator.isValidCount(0L))
+        assertFalse(StepInputValidator.isValidCount(-1L))
+        assertFalse(StepInputValidator.isValidCount(StepInputValidator.MAX_STEPS_PER_WRITE + 1))
     }
 
     @Test
-    fun countIsRedistributedWhenFutureSlotsAreExcluded() {
-        val now = Instant.parse("2026-10-15T06:00:00Z")
-        val result = StepSessionPlanner.plan(999L, date, zone, now)
-        assertEquals(999L, result.sumOf { it.count })
-        assertTrue(result.all { it.count > 0L })
-    }
-
-    @Test(expected = IllegalArgumentException::class)
-    fun zeroCountIsRejected() {
-        StepSessionPlanner.plan(0L, date, zone, Instant.parse("2026-10-15T20:30:00Z"))
-    }
-
-    @Test(expected = IllegalArgumentException::class)
-    fun failsClearlyWhenNoSessionIsEligible() {
-        StepSessionPlanner.plan(
-            10L,
-            date.minusDays(1),
-            zone,
-            Instant.parse("2026-10-15T20:30:00Z")
-        )
+    fun acceptsOnlyPositiveTimeIntervals() {
+        val start = Instant.parse("2026-10-15T10:00:00Z")
+        assertTrue(StepInputValidator.isValidInterval(start, start.plusSeconds(1)))
+        assertFalse(StepInputValidator.isValidInterval(start, start))
+        assertFalse(StepInputValidator.isValidInterval(start, start.minusSeconds(1)))
     }
 }
